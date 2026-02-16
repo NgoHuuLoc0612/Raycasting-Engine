@@ -20,6 +20,12 @@
 #define MAX_PARTICLES 2048
 #define PHYSICS_SUBSTEPS 4
 
+// Advanced features configuration
+#define MAX_THREADS 4
+#define IRRADIANCE_PROBES 64
+#define MAX_AUDIO_SOURCES 32
+#define MAX_SCRIPTS 64
+
 // Vector and matrix structures
 typedef struct {
     float x, y;
@@ -186,8 +192,117 @@ typedef struct {
     float exposure;
 } PostProcessing;
 
-// Main engine state
+// =============================================================================
+// ADVANCED FEATURES - TYPE DEFINITIONS
+// =============================================================================
+
+// --- Threading ---
 typedef struct {
+    int start_column;
+    int end_column;
+    struct Engine* engine;
+    bool completed;
+} RenderJob;
+
+typedef struct {
+    bool use_threading;
+    int job_count;
+    RenderJob jobs[MAX_THREADS];
+    void* thread_handles[MAX_THREADS];
+} ThreadPool;
+
+// --- PBR (Physically-Based Rendering) ---
+typedef struct {
+    ColorF albedo;
+    float metallic;
+    float roughness;
+    float ao;
+    float emissive_strength;
+    int albedo_map;
+    int normal_map;
+    int metallic_map;
+    int roughness_map;
+    int ao_map;
+    int emissive_map;
+} PBRMaterial;
+
+// --- Global Illumination ---
+typedef struct {
+    Vec3 position;
+    ColorF irradiance[6];
+    float influence_radius;
+    bool needs_update;
+} IrradianceProbe;
+
+// --- Audio System ---
+typedef struct {
+    Vec3 position;
+    float volume;
+    float pitch;
+    float max_distance;
+    float rolloff_factor;
+    bool looping;
+    bool playing;
+    bool positional;
+    int audio_buffer_id;
+    float playback_position;
+} AudioSource;
+
+// --- Scripting System ---
+typedef enum {
+    SCRIPT_TYPE_NULL,
+    SCRIPT_TYPE_NUMBER,
+    SCRIPT_TYPE_STRING,
+    SCRIPT_TYPE_BOOL,
+    SCRIPT_TYPE_VECTOR3
+} ScriptValueType;
+
+typedef struct ScriptValue {
+    ScriptValueType type;
+    union {
+        float number;
+        char* string;
+        bool boolean;
+        Vec3 vector;
+    } data;
+} ScriptValue;
+
+typedef ScriptValue (*ScriptFunction)(struct Engine* engine, ScriptValue* args, int arg_count);
+
+typedef struct {
+    char name[64];
+    ScriptValueType type;
+    union {
+        float number;
+        char* string;
+        bool boolean;
+        Vec3 vector;
+    } data;
+} ScriptProperty;
+
+typedef struct {
+    char name[64];
+    bool active;
+    ScriptFunction update;
+    ScriptFunction on_collision;
+    ScriptFunction on_trigger;
+    ScriptProperty properties[32];
+    int property_count;
+} Script;
+
+// --- Compute Shader Acceleration ---
+typedef struct {
+    bool use_compute;
+    int buffer_size;
+    uint32_t* input_buffer;
+    uint32_t* output_buffer;
+} ComputeContext;
+
+// =============================================================================
+// MAIN ENGINE STATE
+// =============================================================================
+
+typedef struct Engine {
     Camera camera;
     WorldMap world;
     Texture textures[MAX_TEXTURES];
@@ -205,9 +320,29 @@ typedef struct {
     float delta_time;
     uint64_t frame_count;
     float time_accumulator;
+    
+    // Advanced features
+    bool use_multithreading;
+    ThreadPool thread_pool;
+    
+    bool use_gi;
+    IrradianceProbe gi_probes[IRRADIANCE_PROBES];
+    int probe_count;
+    
+    AudioSource audio_sources[MAX_AUDIO_SOURCES];
+    int audio_source_count;
+    
+    Script scripts[MAX_SCRIPTS];
+    int script_count;
+    
+    ComputeContext compute_ctx;
 } Engine;
 
-// Function declarations
+// =============================================================================
+// FUNCTION DECLARATIONS
+// =============================================================================
+
+// Core engine functions
 void engine_init(Engine* engine);
 void engine_cleanup(Engine* engine);
 void engine_update(Engine* engine, float delta_time);
@@ -356,5 +491,64 @@ void profile_begin(ProfileSection* section);
 void profile_end(ProfileSection* section);
 void profile_reset(ProfileSection* section);
 float profile_get_ms(ProfileSection* section);
+
+// =============================================================================
+// ADVANCED FEATURES - FUNCTION DECLARATIONS
+// =============================================================================
+
+// Threading
+void threading_init(ThreadPool* pool);
+void threading_cleanup(ThreadPool* pool);
+void* threading_render_job(void* arg);
+void threading_render_parallel(Engine* engine);
+
+// PBR
+void pbr_init_material(PBRMaterial* mat);
+ColorF pbr_calculate_lighting(PBRMaterial* mat, Vec3 normal, Vec3 view_dir, 
+                              Vec3 light_dir, ColorF light_color);
+float pbr_distribution_ggx(Vec3 normal, Vec3 halfway, float roughness);
+float pbr_geometry_smith(Vec3 normal, Vec3 view_dir, Vec3 light_dir, float roughness);
+Vec3 pbr_fresnel_schlick(float cos_theta, Vec3 f0);
+ColorF pbr_image_based_lighting(PBRMaterial* mat, Vec3 normal, Vec3 view_dir, 
+                                IrradianceProbe* probe);
+
+// Global Illumination
+void gi_init_probes(Engine* engine);
+void gi_update_probe(Engine* engine, IrradianceProbe* probe);
+ColorF gi_sample_irradiance(Engine* engine, Vec3 position, Vec3 normal);
+void gi_propagate_light(Engine* engine);
+
+// Audio
+void audio_init(Engine* engine);
+void audio_cleanup(Engine* engine);
+void audio_update(Engine* engine);
+int audio_load_sound(const char* filename);
+void audio_play(AudioSource* source);
+void audio_stop(AudioSource* source);
+void audio_set_listener(Vec3 position, Vec3 forward, Vec3 up);
+void audio_update_3d(AudioSource* source, Vec3 listener_pos);
+
+// Scripting
+void script_init(Engine* engine);
+void script_cleanup(Engine* engine);
+void script_load(Engine* engine, const char* filename);
+void script_update_all(Engine* engine);
+ScriptValue script_call_function(Script* script, const char* func_name, 
+                                 Engine* engine, ScriptValue* args, int arg_count);
+void script_register_function(const char* name, ScriptFunction func);
+ScriptValue script_create_value_number(float value);
+ScriptValue script_create_value_vector(Vec3 value);
+ScriptValue script_create_value_bool(bool value);
+ScriptValue script_example_on_update(Engine* engine, ScriptValue* args, int arg_count);
+ScriptValue script_example_on_collision(Engine* engine, ScriptValue* args, int arg_count);
+
+// Compute Shader Acceleration
+void compute_init(ComputeContext* ctx, int buffer_size);
+void compute_cleanup(ComputeContext* ctx);
+void compute_dispatch_post_process(ComputeContext* ctx, uint32_t* input, 
+                                   uint32_t* output, int width, int height);
+void compute_dispatch_lighting(ComputeContext* ctx, Engine* engine);
+void compute_dispatch_post_process_simd(ComputeContext* ctx, uint32_t* input,
+                                       uint32_t* output, int width, int height);
 
 #endif // ENGINE_H
